@@ -550,7 +550,6 @@ fastify.get('/order-items/:orderId', async (request, reply) => {
   }
 });
 
-
 // Start the server
 const start = async () => {
   try {
