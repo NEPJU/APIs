@@ -559,10 +559,6 @@ const start = async () => {
     console.error('Error starting server:', err);
     process.exit(1);
   }
-};
-
-
-
-
+}
 
 start();
