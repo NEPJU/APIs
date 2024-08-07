@@ -550,6 +550,56 @@ fastify.get('/order-items/:orderId', async (request, reply) => {
   }
 });
 
+fastify.put('/orders/:orderId/status', async (request, reply) => {
+  const orderId = request.params.orderId;
+  const { status } = request.body;
+
+  if (!orderId || !status) {
+    return reply.status(400).send({ message: 'Order ID and status are required' });
+  }
+
+  try {
+    const query = 'UPDATE orders SET status = ? WHERE order_id = ?';
+    const [result] = await pool.query(query, [status, orderId]);
+
+    if (result.affectedRows === 0) {
+      return reply.status(404).send({ message: 'Order not found' });
+    }
+
+    reply.status(200).send({ message: 'Order status updated successfully' });
+  } catch (error) {
+    console.error('Error updating order status:', error.message);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
+});
+
+fastify.post('/orders/:orderId/upload', async (request, reply) => {
+  const orderId = request.params.orderId;
+  const data = await request.file();
+
+  if (!data) {
+    return reply.status(400).send({ success: false, message: 'No file uploaded' });
+  }
+
+  // Read file data into a buffer
+  const chunks = [];
+  data.file.on('data', chunk => chunks.push(chunk));
+  data.file.on('end', async () => {
+    const fileBuffer = Buffer.concat(chunks);
+
+    // Save file data as BLOB in the database
+    try {
+      const query = 'INSERT INTO payment_proofs (order_id, file_data) VALUES (?, ?)';
+      await pool.query(query, [orderId, fileBuffer]);
+
+      reply.status(200).send({ success: true, message: 'File uploaded successfully' });
+    } catch (err) {
+      console.error('Error saving file info to database:', err);
+      reply.status(500).send({ success: false, message: 'Internal server error' });
+    }
+  });
+});
+
 // Start the server
 const start = async () => {
   try {
