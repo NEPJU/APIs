@@ -552,26 +552,35 @@ fastify.get('/order-items/:orderId', async (request, reply) => {
 
 fastify.put('/orders/:orderId/status', async (request, reply) => {
   const orderId = request.params.orderId;
-  const { status } = request.body;
+  const { status, tracking_number, payment_image_base64 } = request.body;
+
+  console.log('Received data:', { orderId, status, tracking_number, payment_image_base64 });
 
   if (!orderId || !status) {
     return reply.status(400).send({ message: 'Order ID and status are required' });
   }
 
   try {
-    const query = 'UPDATE orders SET status = ? WHERE order_id = ?';
-    const [result] = await pool.query(query, [status, orderId]);
+    const query = `
+      UPDATE orders 
+      SET status = ?, tracking_number = ?, payment_image_base64 = ?
+      WHERE order_id = ?
+    `;
+    console.log('Executing query with:', { status, tracking_number, payment_image_base64, orderId });
+    const [result] = await pool.query(query, [status, tracking_number, payment_image_base64, orderId]);
 
     if (result.affectedRows === 0) {
+      console.log('No rows affected, order not found.');
       return reply.status(404).send({ message: 'Order not found' });
     }
 
-    reply.status(200).send({ message: 'Order status updated successfully' });
+    reply.status(200).send({ message: 'Order status and tracking number updated successfully' });
   } catch (error) {
-    console.error('Error updating order status:', error.message);
+    console.error('Error updating order:', error.message);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
 
 fastify.post('/orders/:orderId/upload', async (request, reply) => {
   const orderId = request.params.orderId;
@@ -598,6 +607,54 @@ fastify.post('/orders/:orderId/upload', async (request, reply) => {
       reply.status(500).send({ success: false, message: 'Internal server error' });
     }
   });
+});
+
+fastify.get('/admin/orders', async (request, reply) => {
+  try {
+    const query = `
+      SELECT 
+        order_id, 
+        member_id, 
+        order_date, 
+        total_amount, 
+        status, 
+        payment_image_base64
+      FROM orders 
+      WHERE status = 'Waiting'
+    `;
+    const [orders] = await pool.query(query);
+    reply.status(200).send(orders);
+  } catch (err) {
+    console.error('Error fetching orders:', err);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
+});
+
+fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
+  const orderId = request.params.orderId;
+  const { status } = request.body;
+
+  if (!orderId || !status) {
+    return reply.status(400).send({ message: 'Order ID and status are required' });
+  }
+
+  try {
+    const query = `
+      UPDATE orders 
+      SET status = ? 
+      WHERE order_id = ?
+    `;
+    const [result] = await pool.query(query, [status, orderId]);
+
+    if (result.affectedRows === 0) {
+      return reply.status(404).send({ message: 'Order not found' });
+    }
+
+    reply.status(200).send({ message: 'Order status updated successfully' });
+  } catch (error) {
+    console.error('Error updating order:', error.message);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
 });
 
 // Start the server
