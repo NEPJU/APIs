@@ -612,15 +612,8 @@ fastify.post('/orders/:orderId/upload', async (request, reply) => {
 fastify.get('/admin/orders', async (request, reply) => {
   try {
     const query = `
-      SELECT 
-        order_id, 
-        member_id, 
-        order_date, 
-        total_amount, 
-        status, 
-        payment_image_base64
-      FROM orders 
-      WHERE status = 'Waiting'
+      SELECT * FROM orders 
+      WHERE status = 'Waiting' OR status = 'Shipped'
     `;
     const [orders] = await pool.query(query);
     reply.status(200).send(orders);
@@ -629,6 +622,7 @@ fastify.get('/admin/orders', async (request, reply) => {
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
 
 fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   const orderId = request.params.orderId;
