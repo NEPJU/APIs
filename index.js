@@ -633,23 +633,56 @@ fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   }
 
   try {
-    const query = `
+    // Begin a transaction
+    await pool.query('START TRANSACTION');
+
+    // Update the order status
+    const updateOrderQuery = `
       UPDATE orders 
       SET status = ? 
       WHERE order_id = ?
     `;
-    const [result] = await pool.query(query, [status, orderId]);
+    const [orderResult] = await pool.query(updateOrderQuery, [status, orderId]);
 
-    if (result.affectedRows === 0) {
+    if (orderResult.affectedRows === 0) {
+      await pool.query('ROLLBACK');
       return reply.status(404).send({ message: 'Order not found' });
     }
 
-    reply.status(200).send({ message: 'Order status updated successfully' });
+    // Fetch the order items
+    const orderItemsQuery = `
+      SELECT product_id, quantity 
+      FROM order_items 
+      WHERE order_id = ?
+    `;
+    const [orderItems] = await pool.query(orderItemsQuery, [orderId]);
+
+    // Reduce the quantity of each product and increase the sales count
+    for (const item of orderItems) {
+      const updateProductQuery = `
+        UPDATE products 
+        SET 
+          quantity = quantity - ?, 
+          sales_count = sales_count + ? 
+        WHERE product_id = ?
+      `;
+      
+      await pool.query(updateProductQuery, [item.quantity, item.quantity, item.product_id]);
+    }
+
+    // Commit the transaction
+    await pool.query('COMMIT');
+
+    reply.status(200).send({ message: 'Order status updated, product quantities reduced, and sales count adjusted successfully.' });
   } catch (error) {
+    // Rollback the transaction in case of error
+    await pool.query('ROLLBACK');
     console.error('Error updating order:', error.message);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
+
 
 // Start the server
 const start = async () => {
