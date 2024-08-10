@@ -682,6 +682,28 @@ fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   }
 });
 
+fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
+  const orderId = request.params.orderId;
+  const { tracking_number } = request.body;
+
+  if (!orderId || !tracking_number) {
+    return reply.status(400).send({ message: 'Order ID and tracking number are required' });
+  }
+
+  try {
+    const query = 'UPDATE orders SET tracking_number = ? WHERE order_id = ? AND status = "Shipped"';
+    const [result] = await pool.query(query, [tracking_number, orderId]);
+
+    if (result.affectedRows === 0) {
+      return reply.status(404).send({ message: 'Order not found or not in Shipped status' });
+    }
+
+    reply.status(200).send({ message: 'Tracking number updated successfully' });
+  } catch (error) {
+    console.error('Error updating tracking number:', error.message);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
+});
 
 
 // Start the server
