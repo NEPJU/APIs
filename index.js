@@ -550,6 +550,37 @@ fastify.get('/order-items/:orderId', async (request, reply) => {
   }
 });
 
+// fastify.put('/orders/:orderId/status', async (request, reply) => {
+//   const orderId = request.params.orderId;
+//   const { status, tracking_number, payment_image_base64 } = request.body;
+
+//   console.log('Received data:', { orderId, status, tracking_number, payment_image_base64 });
+
+//   if (!orderId || !status) {
+//     return reply.status(400).send({ message: 'Order ID and status are required' });
+//   }
+
+//   try {
+//     const query = `
+//       UPDATE orders 
+//       SET status = ?, tracking_number = ?, payment_image_base64 = ?
+//       WHERE order_id = ?
+//     `;
+//     console.log('Executing query with:', { status, tracking_number, payment_image_base64, orderId });
+//     const [result] = await pool.query(query, [status, tracking_number, payment_image_base64, orderId]);
+
+//     if (result.affectedRows === 0) {
+//       console.log('No rows affected, order not found.');
+//       return reply.status(404).send({ message: 'Order not found' });
+//     }
+
+//     reply.status(200).send({ message: 'Order status and tracking number updated successfully' });
+//   } catch (error) {
+//     console.error('Error updating order:', error.message);
+//     reply.status(500).send({ message: 'Internal server error' });
+//   }
+// });
+
 fastify.put('/orders/:orderId/status', async (request, reply) => {
   const orderId = request.params.orderId;
   const { status, tracking_number, payment_image_base64 } = request.body;
@@ -561,20 +592,34 @@ fastify.put('/orders/:orderId/status', async (request, reply) => {
   }
 
   try {
-    const query = `
-      UPDATE orders 
-      SET status = ?, tracking_number = ?, payment_image_base64 = ?
-      WHERE order_id = ?
-    `;
-    console.log('Executing query with:', { status, tracking_number, payment_image_base64, orderId });
-    const [result] = await pool.query(query, [status, tracking_number, payment_image_base64, orderId]);
+    // เริ่ม query ด้วยการอัปเดต status เท่านั้น
+    let query = `UPDATE orders SET status = ?`;
+    const params = [status];
+
+    // เพิ่มเงื่อนไขเฉพาะเมื่อมีการส่งค่า tracking_number
+    if (tracking_number !== undefined) {
+      query += `, tracking_number = ?`;
+      params.push(tracking_number);
+    }
+
+    // เพิ่มเงื่อนไขเฉพาะเมื่อมีการส่งค่า payment_image_base64
+    if (payment_image_base64 !== undefined) {
+      query += `, payment_image_base64 = ?`;
+      params.push(payment_image_base64);
+    }
+
+    query += ` WHERE order_id = ?`;
+    params.push(orderId);
+
+    console.log('Executing query with:', { query, params });
+    const [result] = await pool.query(query, params);
 
     if (result.affectedRows === 0) {
       console.log('No rows affected, order not found.');
       return reply.status(404).send({ message: 'Order not found' });
     }
 
-    reply.status(200).send({ message: 'Order status and tracking number updated successfully' });
+    reply.status(200).send({ message: 'Order updated successfully' });
   } catch (error) {
     console.error('Error updating order:', error.message);
     reply.status(500).send({ message: 'Internal server error' });
@@ -590,30 +635,35 @@ fastify.post('/orders/:orderId/upload', async (request, reply) => {
     return reply.status(400).send({ success: false, message: 'No file uploaded' });
   }
 
-  // Read file data into a buffer
-  const chunks = [];
-  data.file.on('data', chunk => chunks.push(chunk));
-  data.file.on('end', async () => {
-    const fileBuffer = Buffer.concat(chunks);
+  try {
+    const chunks = [];
+    data.file.on('data', chunk => chunks.push(chunk));
+    data.file.on('end', async () => {
+      const fileBuffer = Buffer.concat(chunks);
+      const base64Image = `data:${data.mimetype};base64,${fileBuffer.toString('base64')}`;
 
-    // Save file data as BLOB in the database
-    try {
-      const query = 'INSERT INTO payment_proofs (order_id, file_data) VALUES (?, ?)';
-      await pool.query(query, [orderId, fileBuffer]);
+      // Update the orders table with the base64 image string
+      const query = 'UPDATE orders SET payment_image_base64 = ? WHERE order_id = ?';
+      const [result] = await pool.query(query, [base64Image, orderId]);
 
-      reply.status(200).send({ success: true, message: 'File uploaded successfully' });
-    } catch (err) {
-      console.error('Error saving file info to database:', err);
-      reply.status(500).send({ success: false, message: 'Internal server error' });
-    }
-  });
+      if (result.affectedRows > 0) {
+        reply.status(200).send({ success: true, message: 'File uploaded successfully', imageUrl: base64Image });
+      } else {
+        reply.status(400).send({ success: false, message: 'Order not found or no changes made' });
+      }
+    });
+  } catch (err) {
+    console.error('Error saving file info to database:', err);
+    reply.status(500).send({ success: false, message: 'Internal server error' });
+  }
 });
+
 
 fastify.get('/admin/orders', async (request, reply) => {
   try {
     const query = `
       SELECT * FROM orders 
-      WHERE status = 'Waiting' OR status = 'Shipped'
+      WHERE status = 'Waiting' OR status = 'Shipped' OR status = 'Delivered'
     `;
     const [orders] = await pool.query(query);
     reply.status(200).send(orders);
