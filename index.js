@@ -822,6 +822,46 @@ fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
   }
 });
 
+fastify.get('/dashboard/sales-summary', async (request, reply) => {
+  try {
+    // Total sales amount
+    const [totalSales] = await pool.query('SELECT SUM(total_price) AS total_sales FROM sales_summary');
+
+    // Top-selling products
+    const [topProducts] = await pool.query(`
+      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+      FROM sales_summary
+      GROUP BY product_name
+      ORDER BY total_quantity DESC
+      LIMIT 10
+    `);
+
+    // Sales by category
+    const [salesByCategory] = await pool.query(`
+      SELECT product_category, SUM(total_price) AS total_revenue
+      FROM sales_summary
+      GROUP BY product_category
+    `);
+
+    // Sales over time (e.g., daily sales)
+    const [salesOverTime] = await pool.query(`
+      SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
+      FROM sales_summary
+      GROUP BY DATE(order_date)
+      ORDER BY sale_date
+    `);
+
+    reply.send({
+      total_sales: totalSales[0].total_sales,
+      top_products: topProducts,
+      sales_by_category: salesByCategory,
+      sales_over_time: salesOverTime
+    });
+  } catch (error) {
+    console.error('Error fetching sales summary:', error);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
+});
 
 
 
