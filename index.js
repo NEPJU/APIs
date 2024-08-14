@@ -665,6 +665,63 @@ fastify.put('/orders/:orderId/cancel-order', async (request, reply) => {
   }
 });
 
+// fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
+//   const orderId = request.params.orderId;
+//   const { status } = request.body;
+
+//   if (!orderId || !status) {
+//     return reply.status(400).send({ message: 'Order ID and status are required' });
+//   }
+
+//   try {
+//     // Begin a transaction
+//     await pool.query('START TRANSACTION');
+
+//     // Update the order status
+//     const updateOrderQuery = `
+//       UPDATE orders 
+//       SET status = ? 
+//       WHERE order_id = ?
+//     `;
+//     const [orderResult] = await pool.query(updateOrderQuery, [status, orderId]);
+
+//     if (orderResult.affectedRows === 0) {
+//       await pool.query('ROLLBACK');
+//       return reply.status(404).send({ message: 'Order not found' });
+//     }
+
+//     // Fetch the order items
+//     const orderItemsQuery = `
+//       SELECT product_id, quantity 
+//       FROM order_items 
+//       WHERE order_id = ?
+//     `;
+//     const [orderItems] = await pool.query(orderItemsQuery, [orderId]);
+
+//     // Reduce the quantity of each product and increase the sales count
+//     for (const item of orderItems) {
+//       const updateProductQuery = `
+//         UPDATE products 
+//         SET 
+//           quantity = quantity - ?, 
+//           sales_count = sales_count + ? 
+//         WHERE product_id = ?
+//       `;
+      
+//       await pool.query(updateProductQuery, [item.quantity, item.quantity, item.product_id]);
+//     }
+
+//     // Commit the transaction
+//     await pool.query('COMMIT');
+
+//     reply.status(200).send({ message: 'Order status updated, product quantities reduced, and sales count adjusted successfully.' });
+//   } catch (error) {
+//     // Rollback the transaction in case of error
+//     await pool.query('ROLLBACK');
+//     console.error('Error updating order:', error.message);
+//     reply.status(500).send({ message: 'Internal server error' });
+//   }
+// });
 
 fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   const orderId = request.params.orderId;
@@ -675,32 +732,33 @@ fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   }
 
   try {
-    // Begin a transaction
+    // Start a transaction to ensure atomicity
     await pool.query('START TRANSACTION');
 
     // Update the order status
-    const updateOrderQuery = `
-      UPDATE orders 
-      SET status = ? 
-      WHERE order_id = ?
-    `;
-    const [orderResult] = await pool.query(updateOrderQuery, [status, orderId]);
+    const [orderResult] = await pool.query('UPDATE orders SET status = ? WHERE order_id = ?', [status, orderId]);
 
     if (orderResult.affectedRows === 0) {
       await pool.query('ROLLBACK');
       return reply.status(404).send({ message: 'Order not found' });
     }
 
-    // Fetch the order items
-    const orderItemsQuery = `
-      SELECT product_id, quantity 
-      FROM order_items 
-      WHERE order_id = ?
-    `;
-    const [orderItems] = await pool.query(orderItemsQuery, [orderId]);
+    // Fetch order details for logging
+    const [order] = await pool.query('SELECT * FROM orders WHERE order_id = ?', [orderId]);
+    const [orderItems] = await pool.query(`
+      SELECT 
+        oi.*, 
+        p.product_name, 
+        p.category 
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.product_id
+      WHERE oi.order_id = ?`, 
+      [orderId]
+    );
 
-    // Reduce the quantity of each product and increase the sales count
+    // Log each item in the sales_summary table and update the product's quantity and sales count
     for (const item of orderItems) {
+      // Update the product quantity and sales count
       const updateProductQuery = `
         UPDATE products 
         SET 
@@ -708,21 +766,38 @@ fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
           sales_count = sales_count + ? 
         WHERE product_id = ?
       `;
-      
       await pool.query(updateProductQuery, [item.quantity, item.quantity, item.product_id]);
+
+      // Insert into sales_summary
+      await pool.query(
+        'INSERT INTO sales_summary (order_id, member_id, product_id, product_name, product_category, quantity, price, total_price, order_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          orderId,
+          order[0].member_id,
+          item.product_id,
+          item.product_name,
+          item.category,
+          item.quantity,
+          item.price,
+          item.quantity * item.price,
+          order[0].order_date
+        ]
+      );
     }
 
     // Commit the transaction
     await pool.query('COMMIT');
 
-    reply.status(200).send({ message: 'Order status updated, product quantities reduced, and sales count adjusted successfully.' });
+    reply.status(200).send({ message: 'Order confirmed, product quantities updated, and sales logged successfully.' });
   } catch (error) {
-    // Rollback the transaction in case of error
+    // Rollback in case of error
     await pool.query('ROLLBACK');
-    console.error('Error updating order:', error.message);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
+
+
 
 fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
   const orderId = request.params.orderId;
@@ -746,6 +821,8 @@ fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
+
 
 
 // Start the server
