@@ -64,15 +64,26 @@ fastify.post('/login', async (request, reply) => {
       return;
     }
 
-    const token = jwt.sign({ userId: user.member_id,username: user.username }, 'your_secret_key', { expiresIn: '1h' });
+    // ตรวจสอบบทบาทของผู้ใช้ (role หรือ is_admin)
+    const role = user.role || (user.is_admin ? 'admin' : 'user'); // ใช้ role ถ้ามี หรือ is_admin
 
-    reply.send({ token,username: user.username,userId: user.member_id });
+    const token = jwt.sign(
+      { userId: user.member_id, username: user.username, role }, // เพิ่ม role ลงใน payload ของ token
+      'your_secret_key',
+      { expiresIn: '1h' }
+    );
+
+    reply.send({
+      token,
+      username: user.username,
+      userId: user.member_id,
+      role // ส่งบทบาทของผู้ใช้กลับไปด้วย
+    });
   } catch (err) {
     console.error('Error logging in:', err);
     reply.code(500).send({ message: 'Internal server error' });
   }
 });
-
 fastify.get('/auth/status', async (request, reply) => {
   const authHeader = request.headers.authorization;
 
@@ -631,16 +642,32 @@ fastify.post('/orders/:orderId/upload', async (request, reply) => {
 fastify.get('/admin/orders', async (request, reply) => {
   try {
     const query = `
-      SELECT * FROM orders 
+      SELECT 
+        orders.*, 
+        users.name AS user_name, 
+        users.email AS user_email, 
+        users.address AS user_address, 
+        users.profileimg AS user_profileimg,
+        users.phone_number AS user_phone
+      FROM orders
+      INNER JOIN users ON orders.member_id = users.member_id
       WHERE status = 'Waiting' OR status = 'Shipped' OR status = 'Delivered' OR status = 'Cancelled'
     `;
     const [orders] = await pool.query(query);
-    reply.status(200).send(orders);
+
+    // แปลงข้อมูลโปรไฟล์รูปภาพ (เช่น base64)
+    const ordersWithProfileImg = orders.map(order => ({
+      ...order,
+      user_profileimg: order.user_profileimg ? order.user_profileimg.toString('utf8') : null
+    }));
+    
+    reply.status(200).send(ordersWithProfileImg);
   } catch (err) {
     console.error('Error fetching orders:', err);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
 
 fastify.put('/orders/:orderId/cancel-order', async (request, reply) => {
   const orderId = request.params.orderId;
@@ -664,64 +691,6 @@ fastify.put('/orders/:orderId/cancel-order', async (request, reply) => {
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
-
-// fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
-//   const orderId = request.params.orderId;
-//   const { status } = request.body;
-
-//   if (!orderId || !status) {
-//     return reply.status(400).send({ message: 'Order ID and status are required' });
-//   }
-
-//   try {
-//     // Begin a transaction
-//     await pool.query('START TRANSACTION');
-
-//     // Update the order status
-//     const updateOrderQuery = `
-//       UPDATE orders 
-//       SET status = ? 
-//       WHERE order_id = ?
-//     `;
-//     const [orderResult] = await pool.query(updateOrderQuery, [status, orderId]);
-
-//     if (orderResult.affectedRows === 0) {
-//       await pool.query('ROLLBACK');
-//       return reply.status(404).send({ message: 'Order not found' });
-//     }
-
-//     // Fetch the order items
-//     const orderItemsQuery = `
-//       SELECT product_id, quantity 
-//       FROM order_items 
-//       WHERE order_id = ?
-//     `;
-//     const [orderItems] = await pool.query(orderItemsQuery, [orderId]);
-
-//     // Reduce the quantity of each product and increase the sales count
-//     for (const item of orderItems) {
-//       const updateProductQuery = `
-//         UPDATE products 
-//         SET 
-//           quantity = quantity - ?, 
-//           sales_count = sales_count + ? 
-//         WHERE product_id = ?
-//       `;
-      
-//       await pool.query(updateProductQuery, [item.quantity, item.quantity, item.product_id]);
-//     }
-
-//     // Commit the transaction
-//     await pool.query('COMMIT');
-
-//     reply.status(200).send({ message: 'Order status updated, product quantities reduced, and sales count adjusted successfully.' });
-//   } catch (error) {
-//     // Rollback the transaction in case of error
-//     await pool.query('ROLLBACK');
-//     console.error('Error updating order:', error.message);
-//     reply.status(500).send({ message: 'Internal server error' });
-//   }
-// });
 
 fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
   const orderId = request.params.orderId;
@@ -823,47 +792,174 @@ fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
 });
 
 fastify.get('/dashboard/sales-summary', async (request, reply) => {
-  try {
-    // Total sales amount
-    const [totalSales] = await pool.query('SELECT SUM(total_price) AS total_sales FROM sales_summary');
+  const { date, start_date, end_date } = request.query;
 
-    // Top-selling products
-    const [topProducts] = await pool.query(`
+  let query, totalSalesQuery, salesOverTimeQuery;
+  let queryParams = [];
+
+  if (date) {
+    // กรณีเลือกวันที่เฉพาะเจาะจง
+    query = `
       SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
       FROM sales_summary
+      WHERE DATE(order_date) = ?
       GROUP BY product_name
-      ORDER BY total_quantity DESC
-      LIMIT 10
-    `);
+    `;
 
-    // Sales by category
-    const [salesByCategory] = await pool.query(`
-      SELECT product_category, SUM(total_price) AS total_revenue
+    totalSalesQuery = `
+      SELECT SUM(total_price) AS total_sales
       FROM sales_summary
-      GROUP BY product_category
-    `);
+      WHERE DATE(order_date) = ?
+    `;
 
-    // Sales over time (e.g., daily sales)
-    const [salesOverTime] = await pool.query(`
+    salesOverTimeQuery = `
       SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
       FROM sales_summary
+      WHERE DATE(order_date) = ?
       GROUP BY DATE(order_date)
-      ORDER BY sale_date
-    `);
+    `;
 
-    reply.send({
-      total_sales: totalSales[0].total_sales,
+    queryParams = [date];
+
+  } else if (start_date && end_date) {
+    // กรณีเลือกช่วงเวลา
+    query = `
+      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+      FROM sales_summary
+      WHERE DATE(order_date) BETWEEN ? AND ?
+      GROUP BY product_name
+    `;
+
+    totalSalesQuery = `
+      SELECT SUM(total_price) AS total_sales
+      FROM sales_summary
+      WHERE DATE(order_date) BETWEEN ? AND ?
+    `;
+
+    salesOverTimeQuery = `
+      SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
+      FROM sales_summary
+      WHERE DATE(order_date) BETWEEN ? AND ?
+      GROUP BY DATE(order_date)
+    `;
+
+    queryParams = [start_date, end_date];
+  }
+
+  try {
+    const [salesData] = await pool.query(query, queryParams);
+    const [totalSalesData] = await pool.query(totalSalesQuery, queryParams);
+    const [salesOverTimeData] = await pool.query(salesOverTimeQuery, queryParams);
+
+    const totalSales = totalSalesData[0]?.total_sales || 0;
+    const topProducts = salesData.map(item => ({
+      product_name: item.product_name,
+      total_quantity: item.total_quantity,
+      total_revenue: item.total_revenue
+    }));
+
+    reply.send({ 
+      total_sales: totalSales, 
       top_products: topProducts,
-      sales_by_category: salesByCategory,
-      sales_over_time: salesOverTime
+      sales_over_time: salesOverTimeData
     });
   } catch (error) {
-    console.error('Error fetching sales summary:', error);
-    reply.status(500).send({ message: 'Internal server error' });
+    console.error("Database query failed:", error);
+    return reply.status(500).send({ message: 'Internal server error', error: error.message });
   }
 });
 
+// เพิ่มคะแนนดาว
+fastify.post('/product-ratings', async (req, res) => {
+  const { productId, memberId, rating } = req.body;
 
+  if (!productId || !memberId || !rating) {
+    return res.status(400).send({ success: false, message: 'Invalid input data' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO product_reviews (product_id, member_id, rating) VALUES (?, ?, ?)',
+      [productId, memberId, rating]
+    );
+    res.status(201).send({ success: true, ratingId: result.insertId });
+  } catch (error) {
+    console.error('Error adding rating:', error.message, error.stack);
+    res.status(500).send({ success: false, message: 'Failed to add rating' });
+  }
+});
+
+// เพิ่มความคิดเห็นและคะแนน
+fastify.post('/product-reviews', async (req, res) => {
+  const { productId, memberId, review, rating } = req.body;
+
+  if (!productId || !memberId || !review || !rating) {
+    return res.status(400).send({ success: false, message: 'Invalid input data' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO product_reviews (product_id, member_id, review, rating) VALUES (?, ?, ?, ?)',
+      [productId, memberId, review, rating]
+    );
+    res.status(201).send({ success: true, reviewId: result.insertId });
+  } catch (error) {
+    console.error('Error adding review:', error.message, error.stack);
+    res.status(500).send({ success: false, message: 'Failed to add review' });
+  }
+});
+
+fastify.get('/product-reviews/:productId', async (req, res) => {
+  const { productId } = req.params;
+
+  try {
+    const query = `
+      SELECT pr.*, u.username, CAST(u.profileimg AS CHAR) AS profileimg 
+      FROM product_reviews pr 
+      JOIN users u ON pr.member_id = u.member_id 
+      WHERE pr.product_id = ?
+    `;
+
+    const [reviews] = await pool.query(query, [productId]);
+
+    // ข้อมูล profileimg ถูกเก็บในรูปแบบ Base64 แล้ว ดังนั้นสามารถส่งข้อมูลตรงๆ กลับไปได้เลย
+    res.send(reviews);
+  } catch (error) {
+    console.error('Error fetching reviews:', error.message, error.stack);
+    res.status(500).send({ success: false, message: 'Failed to fetch reviews' });
+  }
+});
+
+fastify.delete('/product-reviews/:reviewId', async (req, res) => {
+  const { reviewId } = req.params;
+
+  try {
+    await pool.query('DELETE FROM product_reviews WHERE review_id = ?', [reviewId]);
+    res.send({ success: true, message: 'Review deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting review:', error.message, error.stack);
+    res.status(500).send({ success: false, message: 'Failed to delete review' });
+  }
+});
+
+fastify.get('/products/:productId', async (request, reply) => {
+  const { productId } = request.params;
+
+  try {
+    // สมมติว่าคอลัมน์รูปภาพชื่อว่า `product_image`
+    const [product] = await pool.query(
+      'SELECT product_id, product_name, description, price, quantity, CAST(image_base64 AS CHAR) AS image_base64 FROM products WHERE product_id = ?',
+      [productId]
+    );
+    if (product.length === 0) {
+      return reply.status(404).send({ message: 'Product not found' });
+    }
+    reply.send(product[0]);
+  } catch (error) {
+    console.error('Error fetching product:', error.message);
+    reply.status(500).send({ message: 'Internal server error' });
+  }
+});
 
 // Start the server
 const start = async () => {
