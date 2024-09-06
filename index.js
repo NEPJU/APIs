@@ -282,20 +282,32 @@ fastify.delete('/products/:productId', async (request, reply) => {
   const productId = request.params.productId;
 
   try {
-    // Delete product from the database
+    // Start a transaction to ensure atomicity
+    await pool.query('START TRANSACTION');
+
+    // Delete from related tables referencing the product_id
+    await pool.query('DELETE FROM order_items WHERE product_id = ?', [productId]);
+    await pool.query('DELETE FROM favorite_products WHERE product_id = ?', [productId]);
+    await pool.query('DELETE FROM shopping_cart WHERE product_id = ?', [productId]);
+
+    // Delete the product itself from the products table
     await pool.query('DELETE FROM products WHERE product_id = ?', [productId]);
 
-    // Reorder product ids
-    await pool.query('SET @counter = 0');
-    await pool.query('UPDATE products SET product_id = @counter := @counter + 1');
-    await pool.query('ALTER TABLE products AUTO_INCREMENT = 1');
+    // Commit the transaction
+    await pool.query('COMMIT');
 
-    reply.code(200).send({ message: 'Product deleted successfully' });
+    reply.code(200).send({ message: 'Product and related records deleted successfully' });
   } catch (err) {
+    // Rollback the transaction in case of an error
+    await pool.query('ROLLBACK');
+
     console.error('Error deleting product:', err);
     reply.code(500).send({ message: 'Internal server error' });
   }
 });
+
+
+
 
 fastify.get('/user/:id', async (request, reply) => {
   const { id } = request.params;
