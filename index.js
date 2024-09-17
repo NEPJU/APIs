@@ -241,8 +241,23 @@ fastify.post('/upload-image', async (request, reply) => {
 
 fastify.get('/products', async (request, reply) => {
   try {
-    // Query to fetch all product data from the database
-    const [rows] = await pool.query('SELECT product_id, product_name, description, price, quantity, category, image_base64, sales_count FROM products ');
+    // Query to fetch all product data from the database with average rating
+    const [rows] = await pool.query(`
+      SELECT 
+        p.product_id, 
+        p.product_name, 
+        p.description, 
+        p.price, 
+        p.quantity, 
+        p.category, 
+        p.image_base64, 
+        p.sales_count,
+        IFNULL(AVG(r.rating), 0) AS averageRating  -- Calculate average rating
+      FROM products p
+      LEFT JOIN product_reviews r ON p.product_id = r.product_id  -- Join with reviews table
+      GROUP BY p.product_id  -- Group by product_id to get each product's details with its average rating
+    `);
+
     const productDetails = rows.map(product => ({
       ProductID: product.product_id,
       ProductName: product.product_name,
@@ -251,8 +266,11 @@ fastify.get('/products', async (request, reply) => {
       ProductQuantity: product.quantity,
       ProductCategory: product.category,
       ProductImage: `${product.image_base64}`,
-      ProductSaleCount : product.sales_count,
+      ProductSaleCount: product.sales_count,
+      averageRating: product.averageRating !== null ? parseFloat(product.averageRating).toFixed(1) : "0.0"
+
     }));
+
     reply.send(productDetails);
   } catch (err) {
     console.error('Error fetching products:', err);
@@ -803,6 +821,84 @@ fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
   }
 });
 
+// fastify.get('/dashboard/sales-summary', async (request, reply) => {
+//   const { date, start_date, end_date } = request.query;
+
+//   let query, totalSalesQuery, salesOverTimeQuery;
+//   let queryParams = [];
+
+//   if (date) {
+//     // กรณีเลือกวันที่เฉพาะเจาะจง
+//     query = `
+//       SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+//       FROM sales_summary
+//       WHERE DATE(order_date) = ?
+//       GROUP BY product_name
+//     `;
+
+//     totalSalesQuery = `
+//       SELECT SUM(total_price) AS total_sales
+//       FROM sales_summary
+//       WHERE DATE(order_date) = ?
+//     `;
+
+//     salesOverTimeQuery = `
+//       SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
+//       FROM sales_summary
+//       WHERE DATE(order_date) = ?
+//       GROUP BY DATE(order_date)
+//     `;
+
+//     queryParams = [date];
+
+//   } else if (start_date && end_date) {
+//     // กรณีเลือกช่วงเวลา
+//     query = `
+//       SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+//       FROM sales_summary
+//       WHERE DATE(order_date) BETWEEN ? AND ?
+//       GROUP BY product_name
+//     `;
+
+//     totalSalesQuery = `
+//       SELECT SUM(total_price) AS total_sales
+//       FROM sales_summary
+//       WHERE DATE(order_date) BETWEEN ? AND ?
+//     `;
+
+//     salesOverTimeQuery = `
+//       SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
+//       FROM sales_summary
+//       WHERE DATE(order_date) BETWEEN ? AND ?
+//       GROUP BY DATE(order_date)
+//     `;
+
+//     queryParams = [start_date, end_date];
+//   }
+
+//   try {
+//     const [salesData] = await pool.query(query, queryParams);
+//     const [totalSalesData] = await pool.query(totalSalesQuery, queryParams);
+//     const [salesOverTimeData] = await pool.query(salesOverTimeQuery, queryParams);
+
+//     const totalSales = totalSalesData[0]?.total_sales || 0;
+//     const topProducts = salesData.map(item => ({
+//       product_name: item.product_name,
+//       total_quantity: item.total_quantity,
+//       total_revenue: item.total_revenue
+//     }));
+
+//     reply.send({ 
+//       total_sales: totalSales, 
+//       top_products: topProducts,
+//       sales_over_time: salesOverTimeData
+//     });
+//   } catch (error) {
+//     console.error("Database query failed:", error);
+//     return reply.status(500).send({ message: 'Internal server error', error: error.message });
+//   }
+// });
+
 fastify.get('/dashboard/sales-summary', async (request, reply) => {
   const { date, start_date, end_date } = request.query;
 
@@ -810,12 +906,12 @@ fastify.get('/dashboard/sales-summary', async (request, reply) => {
   let queryParams = [];
 
   if (date) {
-    // กรณีเลือกวันที่เฉพาะเจาะจง
+    // Specific day query
     query = `
-      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue, DATE(order_date) as sale_date
       FROM sales_summary
       WHERE DATE(order_date) = ?
-      GROUP BY product_name
+      GROUP BY product_name, sale_date
     `;
 
     totalSalesQuery = `
@@ -834,12 +930,12 @@ fastify.get('/dashboard/sales-summary', async (request, reply) => {
     queryParams = [date];
 
   } else if (start_date && end_date) {
-    // กรณีเลือกช่วงเวลา
+    // Date range query
     query = `
-      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
+      SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue, DATE(order_date) as sale_date
       FROM sales_summary
       WHERE DATE(order_date) BETWEEN ? AND ?
-      GROUP BY product_name
+      GROUP BY product_name, sale_date
     `;
 
     totalSalesQuery = `
@@ -867,7 +963,8 @@ fastify.get('/dashboard/sales-summary', async (request, reply) => {
     const topProducts = salesData.map(item => ({
       product_name: item.product_name,
       total_quantity: item.total_quantity,
-      total_revenue: item.total_revenue
+      total_revenue: item.total_revenue,
+      sale_date: item.sale_date  // Include sale_date here
     }));
 
     reply.send({ 
@@ -880,6 +977,7 @@ fastify.get('/dashboard/sales-summary', async (request, reply) => {
     return reply.status(500).send({ message: 'Internal server error', error: error.message });
   }
 });
+
 
 // เพิ่มคะแนนดาว
 fastify.post('/product-ratings', async (req, res) => {
@@ -972,6 +1070,7 @@ fastify.get('/products/:productId', async (request, reply) => {
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
 
 // Start the server
 const start = async () => {
