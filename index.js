@@ -217,77 +217,113 @@ async function checkIfImageUploaded() {
 }
 
 fastify.post('/upload-image', async (request, reply) => {
-  console.log('Request body:', request.body);
+  const { product_name, description, price, quantity, category, images_base64 } = request.body;
 
-  const { product_name, description, price, quantity, category, image_base64 } = request.body;
-
-  if (!product_name || !image_base64 || !price || !quantity || !category) {
+  if (!product_name || !images_base64 || !price || !quantity || !category) {
     reply.status(400).send('Missing required fields');
     return;
   }
 
   try {
-    // Insert image data into the database
-    const [result] = await pool.query('INSERT INTO products (product_name, description, price, quantity, category, image_base64) VALUES (?, ?, ?, ?, ?, ?)', [product_name, description, price, quantity, category, image_base64]);
+    // Insert product data into the products table including images
+    await pool.query(
+      'INSERT INTO products (product_name, description, price, quantity, category, images_base64) VALUES (?, ?, ?, ?, ?, ?)',
+      [product_name, description, price, quantity, category, JSON.stringify(images_base64)]
+    );
 
+    // Reorder the product IDs
+    const [products] = await pool.query('SELECT product_id FROM products ORDER BY product_id ASC');
 
-    
-    reply.status(200).send('Image uploaded successfully');
+    // Update product IDs sequentially
+    for (let i = 0; i < products.length; i++) {
+      const oldProductId = products[i].product_id;
+      const newProductId = i + 1;
+
+      // Update the product ID in the products table
+      await pool.query('UPDATE products SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+
+      // Update foreign key references in related tables
+      await pool.query('UPDATE order_items SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+      await pool.query('UPDATE favorite_products SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+      await pool.query('UPDATE shopping_cart SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+    }
+
+    reply.status(200).send('Product and images uploaded successfully and IDs reordered');
   } catch (err) {
-    console.error('Error uploading image:', err);
+    console.error('Error uploading product:', err);
     reply.status(500).send(`Internal server error: ${err.message}`);
   }
 });
+
 
 fastify.get('/products', async (request, reply) => {
   try {
-    // Query to fetch all product data from the database with average rating
-    const [rows] = await pool.query(`
+    const [products] = await pool.query(`
       SELECT 
-        p.product_id, 
-        p.product_name, 
-        p.description, 
-        p.price, 
-        p.quantity, 
-        p.category, 
-        p.image_base64, 
-        p.sales_count,
-        IFNULL(AVG(r.rating), 0) AS averageRating  -- Calculate average rating
-      FROM products p
-      LEFT JOIN product_reviews r ON p.product_id = r.product_id  -- Join with reviews table
-      GROUP BY p.product_id  -- Group by product_id to get each product's details with its average rating
+        product_id AS ProductID,
+        product_name AS ProductName,
+        description AS ProductDescription,
+        price AS ProductPrice,
+        quantity AS ProductQuantity,
+        category AS ProductCategory,
+        sales_count AS ProductSaleCount,
+        COALESCE((
+          SELECT AVG(rating) 
+          FROM product_reviews 
+          WHERE product_id = products.product_id
+        ), 0) AS averageRating,
+        images_base64 AS ProductImage
+      FROM products
     `);
 
-    const productDetails = rows.map(product => ({
-      ProductID: product.product_id,
-      ProductName: product.product_name,
-      ProductDescription: product.description,
-      ProductPrice: product.price,
-      ProductQuantity: product.quantity,
-      ProductCategory: product.category,
-      ProductImage: `${product.image_base64}`,
-      ProductSaleCount: product.sales_count,
-      averageRating: product.averageRating !== null ? parseFloat(product.averageRating).toFixed(1) : "0.0"
+    // Convert images_base64 from JSON String to Array
+    products.forEach(product => {
+      if (product.ProductImage) {
+        try {
+          product.images = JSON.parse(product.ProductImage);
+        } catch (e) {
+          console.error("Error parsing ProductImage JSON:", e);
+          product.images = [];
+        }
+      } else {
+        product.images = [];
+      }
+    });
 
-    }));
-
-    reply.send(productDetails);
+    reply.send(products);
   } catch (err) {
     console.error('Error fetching products:', err);
-    reply.status(500).send(`Internal server error: ${err.message}`);
+    reply.status(500).send({ message: 'Internal server error' });
   }
 });
 
+
+
+
 fastify.put('/products/:productId', async (request, reply) => {
   const productId = request.params.productId;
-  const { ProductName, ProductDescription, ProductPrice, ProductQuantity, ProductCategory } = request.body;
+  const {
+    product_name,
+    description,
+    price,
+    quantity,
+    category
+  } = request.body;
+
+  // Check if any of the required fields are missing
+  if (!product_name || !description || !price || !quantity || !category) {
+    reply.code(400).send({ message: 'All fields are required' });
+    return;
+  }
 
   try {
     // Update product in the database
-    await pool.query('UPDATE products SET product_name = ?, description = ?, price = ?, quantity = ?, category = ? WHERE product_id = ?', 
-      [ProductName, ProductDescription, ProductPrice, ProductQuantity, ProductCategory, productId]);
+    await pool.query(
+      'UPDATE products SET product_name = ?, description = ?, price = ?, quantity = ?, category = ? WHERE product_id = ?',
+      [product_name, description, price, quantity, category, productId]
+    );
 
-      console.log(`Product with ID ${productId} updated successfully`);
+    console.log(`Product with ID ${productId} updated successfully`);
 
     reply.code(200).send({ message: 'Product updated successfully' });
   } catch (err) {
@@ -303,6 +339,9 @@ fastify.delete('/products/:productId', async (request, reply) => {
     // Start a transaction to ensure atomicity
     await pool.query('START TRANSACTION');
 
+    // Disable foreign key checks to allow ID reordering
+    await pool.query('SET FOREIGN_KEY_CHECKS = 0');
+
     // Delete from related tables referencing the product_id
     await pool.query('DELETE FROM order_items WHERE product_id = ?', [productId]);
     await pool.query('DELETE FROM favorite_products WHERE product_id = ?', [productId]);
@@ -311,10 +350,30 @@ fastify.delete('/products/:productId', async (request, reply) => {
     // Delete the product itself from the products table
     await pool.query('DELETE FROM products WHERE product_id = ?', [productId]);
 
+    // Reorder the product IDs
+    const [products] = await pool.query('SELECT product_id FROM products ORDER BY product_id ASC');
+
+    // Update product IDs sequentially
+    for (let i = 0; i < products.length; i++) {
+      const oldProductId = products[i].product_id;
+      const newProductId = i + 1;
+
+      // Update the product ID in the products table
+      await pool.query('UPDATE products SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+
+      // Update foreign key references in related tables
+      await pool.query('UPDATE order_items SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+      await pool.query('UPDATE favorite_products SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+      await pool.query('UPDATE shopping_cart SET product_id = ? WHERE product_id = ?', [newProductId, oldProductId]);
+    }
+
+    // Re-enable foreign key checks
+    await pool.query('SET FOREIGN_KEY_CHECKS = 1');
+
     // Commit the transaction
     await pool.query('COMMIT');
 
-    reply.code(200).send({ message: 'Product and related records deleted successfully' });
+    reply.code(200).send({ message: 'Product and related records deleted and IDs reordered successfully' });
   } catch (err) {
     // Rollback the transaction in case of an error
     await pool.query('ROLLBACK');
@@ -323,6 +382,8 @@ fastify.delete('/products/:productId', async (request, reply) => {
     reply.code(500).send({ message: 'Internal server error' });
   }
 });
+
+
 
 
 
@@ -380,18 +441,93 @@ fastify.put('/user/:id', async (request, reply) => {
   }
 });
 
+// fastify.post('/add-to-cart', async (request, reply) => {
+//   const { memberId, productId, quantity } = request.body;
+
+//   // Log the received request body for debugging
+//   request.log.info(`Received request body: ${JSON.stringify(request.body)}`);
+
+//   if (!memberId || !productId ) {
+//     return reply.status(400).send({ error: 'Missing required fields: memberId, productId, and quantity are required' });
+//   }
+
+//   try {
+//     // ตรวจสอบว่า connection ถูกใช้ถูกต้อง
+//     const [rows] = await pool.query(
+//       'SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?',
+//       [memberId, productId]
+//     );
+
+//     if (rows.length > 0) {
+//       await pool.query(
+//         'UPDATE Shopping_Cart SET quantity = quantity + ? WHERE member_id = ? AND product_id = ?',
+//         [quantity, memberId, productId]
+//       );
+//     } else {
+//       await pool.query(
+//         'INSERT INTO Shopping_Cart (member_id, product_id, quantity) VALUES (?, ?, ?)',
+//         [memberId, productId, quantity]
+//       );
+//     }
+
+//     return reply.send({ success: true, message: 'Product added to cart' });
+//   } catch (err) {
+//     request.log.error(err);
+//     return reply.status(500).send({ error: 'Database error' });
+//   }
+// });
+
+// fastify.post('/add-to-cart', async (request, reply) => {
+//   const { memberId, productId, quantity } = request.body;
+
+//   if (!memberId || !productId) {
+//     return reply.status(400).send({ error: 'Missing required fields: memberId, productId, and quantity are required' });
+//   }
+
+//   try {
+//     // ตรวจสอบว่า connection ถูกใช้ถูกต้อง
+//     const [rows] = await pool.query(
+//       'SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?',
+//       [memberId, productId]
+//     );
+
+//     if (rows.length > 0) {
+//       await pool.query(
+//         'UPDATE Shopping_Cart SET quantity = quantity + ? WHERE member_id = ? AND product_id = ?',
+//         [quantity, memberId, productId]
+//       );
+//     } else {
+//       await pool.query(
+//         'INSERT INTO Shopping_Cart (member_id, product_id, quantity) VALUES (?, ?, ?)',
+//         [memberId, productId, quantity]
+//       );
+//     }
+
+//     // ดึงข้อมูลสินค้าในตะกร้าของผู้ใช้ทั้งหมดกลับมา
+//     const [updatedCart] = await pool.query(
+//       `SELECT sc.cart_id, sc.quantity, p.product_name, p.description, p.price, p.images_base64, p.quantity, sc.product_id
+//       FROM Shopping_Cart sc 
+//       JOIN products p ON sc.product_id = p.product_id 
+//       WHERE sc.member_id = ?`,
+//       [memberId]
+//     );
+
+//     reply.send({ success: true, message: 'Product added to cart', cartItems: updatedCart });
+//   } catch (err) {
+//     request.log.error(err);
+//     return reply.status(500).send({ error: 'Database error' });
+//   }
+// });
+
 fastify.post('/add-to-cart', async (request, reply) => {
   const { memberId, productId, quantity } = request.body;
 
-  // Log the received request body for debugging
-  request.log.info(`Received request body: ${JSON.stringify(request.body)}`);
-
-  if (!memberId || !productId ) {
+  if (!memberId || !productId) {
     return reply.status(400).send({ error: 'Missing required fields: memberId, productId, and quantity are required' });
   }
 
   try {
-    // ตรวจสอบว่า connection ถูกใช้ถูกต้อง
+    // ตรวจสอบว่ามีสินค้าชิ้นนั้นๆ ในตะกร้าอยู่หรือไม่
     const [rows] = await pool.query(
       'SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?',
       [memberId, productId]
@@ -409,36 +545,47 @@ fastify.post('/add-to-cart', async (request, reply) => {
       );
     }
 
-    return reply.send({ success: true, message: 'Product added to cart' });
-  } catch (err) {
-    request.log.error(err);
-    return reply.status(500).send({ error: 'Database error' });
-  }
-});
-
-fastify.get('/cart/:memberId', async (request, reply) => {
-  const { memberId } = request.params;
-
-  try {
-    const [rows] = await pool.query(
-      `SELECT sc.cart_id, sc.quantity, p.product_name, p.description, p.price, p.image_base64, p.quantity, sc.product_id
+    // ดึงข้อมูลสินค้าในตะกร้าของผู้ใช้ทั้งหมดกลับมา
+    const [updatedCart] = await pool.query(
+      `SELECT sc.cart_id, sc.quantity AS quantityInCart, p.product_name, p.description, p.price, p.images_base64, p.quantity, sc.product_id
       FROM Shopping_Cart sc 
       JOIN products p ON sc.product_id = p.product_id 
       WHERE sc.member_id = ?`,
       [memberId]
     );
 
-    const updatedRows = rows.map(row => ({
-      ...row,
-      image_base64: row.image_base64 ? row.image_base64.toString('utf-8') : null
-    }));
-
-    reply.send(updatedRows);
+    reply.send({ success: true, message: 'Product added to cart', cartItems: updatedCart });
   } catch (err) {
     request.log.error(err);
-    reply.status(500).send({ error: 'Database error', details: err.message });
+    return reply.status(500).send({ error: 'Database error' });
   }
 });
+
+
+
+fastify.get('/cart/:memberId', async (request, reply) => {
+  const { memberId } = request.params;
+
+  if (!memberId) {
+    return reply.status(400).send({ error: 'Missing required field: memberId' });
+  }
+
+  try {
+    const [cartItems] = await pool.query(
+      `SELECT sc.cart_id, sc.quantity AS quantityInCart, p.product_name, p.description, p.price, p.images_base64, p.quantity AS productStock, sc.product_id
+      FROM Shopping_Cart sc 
+      JOIN products p ON sc.product_id = p.product_id 
+      WHERE sc.member_id = ?`,
+      [memberId]
+    );
+
+    reply.send(cartItems);
+  } catch (err) {
+    request.log.error(err);
+    return reply.status(500).send({ error: 'Database error' });
+  }
+});
+
 
 fastify.delete('/cart/:memberId/:productId', async (request, reply) => {
   const { memberId, productId } = request.params;
@@ -458,14 +605,25 @@ fastify.delete('/cart/:memberId/:productId', async (request, reply) => {
 fastify.post('/add-to-favorites', async (request, reply) => {
   const { member_id, product_id } = request.body;
 
+  if (!member_id || !product_id) {
+    reply.code(400).send({ success: false, message: 'Missing member_id or product_id' });
+    return;
+  }
+
   try {
-    const [existingFavorite] = await pool.query('SELECT * FROM Favorite_Products WHERE member_id = ? AND product_id = ?', [member_id, product_id]);
+    const [existingFavorite] = await pool.query(
+      'SELECT * FROM Favorite_Products WHERE member_id = ? AND product_id = ?',
+      [member_id, product_id]
+    );
     if (existingFavorite.length > 0) {
       reply.code(400).send({ success: false, message: 'Product is already in favorites' });
       return;
     }
 
-    await pool.query('INSERT INTO Favorite_Products (member_id, product_id) VALUES (?, ?)', [member_id, product_id]);
+    await pool.query(
+      'INSERT INTO Favorite_Products (member_id, product_id) VALUES (?, ?)',
+      [member_id, product_id]
+    );
 
     reply.code(201).send({ success: true, message: 'Product added to favorites' });
   } catch (err) {
@@ -474,12 +632,14 @@ fastify.post('/add-to-favorites', async (request, reply) => {
   }
 });
 
+
+
 fastify.get('/favorites/:member_id', async (request, reply) => {
   const { member_id } = request.params;
 
   try {
     const [favorites] = await pool.query(`
-      SELECT fp.product_id, p.product_name, p.description, p.price, p.image_base64 
+      SELECT fp.product_id, p.product_name, p.description, p.price, p.images_base64 
       FROM Favorite_Products fp
       JOIN products p ON fp.product_id = p.product_id
       WHERE fp.member_id = ?
@@ -574,7 +734,7 @@ fastify.get('/order-items/:orderId', async (request, reply) => {
         p.price AS product_price, 
         p.quantity AS product_quantity, 
         p.category, 
-        CAST(p.image_base64 AS CHAR) AS image_base64, 
+        CAST(p.images_base64 AS CHAR) AS image_base64, 
         p.sales_count
       FROM order_items oi
       JOIN products p ON oi.product_id = p.product_id
@@ -1056,20 +1216,29 @@ fastify.get('/products/:productId', async (request, reply) => {
   const { productId } = request.params;
 
   try {
-    // สมมติว่าคอลัมน์รูปภาพชื่อว่า `product_image`
-    const [product] = await pool.query(
-      'SELECT product_id, product_name, description, price, quantity, CAST(image_base64 AS CHAR) AS image_base64 FROM products WHERE product_id = ?',
-      [productId]
-    );
-    if (product.length === 0) {
+    // Fetch product details
+    const [products] = await pool.query(`
+      SELECT 
+        p.product_id, p.product_name, p.description, p.price, p.quantity, p.category, p.images_base64
+      FROM products p
+      WHERE p.product_id = ?
+    `, [productId]);
+
+    if (products.length === 0) {
       return reply.status(404).send({ message: 'Product not found' });
     }
-    reply.send(product[0]);
-  } catch (error) {
-    console.error('Error fetching product:', error.message);
+
+    const product = products[0];
+
+    reply.send(product);
+  } catch (err) {
+    console.error('Error fetching product:', err);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
+
+
+
 
 
 // Start the server
