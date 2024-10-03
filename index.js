@@ -958,106 +958,57 @@ fastify.put('/orders/:orderId/confirm-payment', async (request, reply) => {
 
 
 
+// fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
+//   const orderId = request.params.orderId;
+//   const { tracking_number } = request.body;
+
+//   if (!orderId || !tracking_number) {
+//     return reply.status(400).send({ message: 'Order ID and tracking number are required' });
+//   }
+
+//   try {
+//     const query = 'UPDATE orders SET tracking_number = ? WHERE order_id = ? AND status = "Shipped"';
+//     const [result] = await pool.query(query, [tracking_number, orderId]);
+
+//     if (result.affectedRows === 0) {
+//       return reply.status(404).send({ message: 'Order not found or not in Shipped status' });
+//     }
+
+//     reply.status(200).send({ message: 'Tracking number updated successfully' });
+//   } catch (error) {
+//     console.error('Error updating tracking number:', error.message);
+//     reply.status(500).send({ message: 'Internal server error' });
+//   }
+// });
+
 fastify.put('/orders/:orderId/add-tracking', async (request, reply) => {
   const orderId = request.params.orderId;
-  const { tracking_number } = request.body;
+  const { tracking_number, carrier_name } = request.body;
 
-  if (!orderId || !tracking_number) {
-    return reply.status(400).send({ message: 'Order ID and tracking number are required' });
+  // ตรวจสอบว่าข้อมูล carrier_name เป็น object และดึงค่า value
+  const carrierValue = carrier_name && carrier_name.value ? carrier_name.value : carrier_name;
+
+  // เพิ่มบรรทัดนี้เพื่อตรวจสอบข้อมูลที่ได้รับ
+  console.log('Received tracking info:', { tracking_number, carrier_name: carrierValue });
+
+  if (!orderId || !tracking_number || !carrierValue) {
+    return reply.status(400).send({ message: 'Order ID, tracking number, and carrier name are required' });
   }
 
   try {
-    const query = 'UPDATE orders SET tracking_number = ? WHERE order_id = ? AND status = "Shipped"';
-    const [result] = await pool.query(query, [tracking_number, orderId]);
+    const query = 'UPDATE orders SET tracking_number = ?, carrier_name = ? WHERE order_id = ? AND status = "Shipped"';
+    const [result] = await pool.query(query, [tracking_number, carrierValue, orderId]);
 
     if (result.affectedRows === 0) {
       return reply.status(404).send({ message: 'Order not found or not in Shipped status' });
     }
 
-    reply.status(200).send({ message: 'Tracking number updated successfully' });
+    reply.status(200).send({ message: 'Tracking number and carrier name updated successfully' });
   } catch (error) {
     console.error('Error updating tracking number:', error.message);
     reply.status(500).send({ message: 'Internal server error' });
   }
 });
-
-// fastify.get('/dashboard/sales-summary', async (request, reply) => {
-//   const { date, start_date, end_date } = request.query;
-
-//   let query, totalSalesQuery, salesOverTimeQuery;
-//   let queryParams = [];
-
-//   if (date) {
-//     // กรณีเลือกวันที่เฉพาะเจาะจง
-//     query = `
-//       SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
-//       FROM sales_summary
-//       WHERE DATE(order_date) = ?
-//       GROUP BY product_name
-//     `;
-
-//     totalSalesQuery = `
-//       SELECT SUM(total_price) AS total_sales
-//       FROM sales_summary
-//       WHERE DATE(order_date) = ?
-//     `;
-
-//     salesOverTimeQuery = `
-//       SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
-//       FROM sales_summary
-//       WHERE DATE(order_date) = ?
-//       GROUP BY DATE(order_date)
-//     `;
-
-//     queryParams = [date];
-
-//   } else if (start_date && end_date) {
-//     // กรณีเลือกช่วงเวลา
-//     query = `
-//       SELECT product_name, SUM(quantity) AS total_quantity, SUM(total_price) AS total_revenue
-//       FROM sales_summary
-//       WHERE DATE(order_date) BETWEEN ? AND ?
-//       GROUP BY product_name
-//     `;
-
-//     totalSalesQuery = `
-//       SELECT SUM(total_price) AS total_sales
-//       FROM sales_summary
-//       WHERE DATE(order_date) BETWEEN ? AND ?
-//     `;
-
-//     salesOverTimeQuery = `
-//       SELECT DATE(order_date) AS sale_date, SUM(total_price) AS total_revenue
-//       FROM sales_summary
-//       WHERE DATE(order_date) BETWEEN ? AND ?
-//       GROUP BY DATE(order_date)
-//     `;
-
-//     queryParams = [start_date, end_date];
-//   }
-
-//   try {
-//     const [salesData] = await pool.query(query, queryParams);
-//     const [totalSalesData] = await pool.query(totalSalesQuery, queryParams);
-//     const [salesOverTimeData] = await pool.query(salesOverTimeQuery, queryParams);
-
-//     const totalSales = totalSalesData[0]?.total_sales || 0;
-//     const topProducts = salesData.map(item => ({
-//       product_name: item.product_name,
-//       total_quantity: item.total_quantity,
-//       total_revenue: item.total_revenue
-//     }));
-
-//     reply.send({ 
-//       total_sales: totalSales, 
-//       top_products: topProducts,
-//       sales_over_time: salesOverTimeData
-//     });
-//   } catch (error) {
-//     console.error("Database query failed:", error);
-//     return reply.status(500).send({ message: 'Internal server error', error: error.message });
-//   }
-// });
 
 fastify.get('/dashboard/sales-summary', async (request, reply) => {
   const { date, start_date, end_date } = request.query;
