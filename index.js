@@ -342,6 +342,8 @@ fastify.delete('/products/:productId', async (request, reply) => {
     // Disable foreign key checks to allow ID reordering
     await pool.query('SET FOREIGN_KEY_CHECKS = 0');
 
+    await pool.query('DELETE FROM product_reviews WHERE product_id = ?', [productId]);
+
     // Delete from related tables referencing the product_id
     await pool.query('DELETE FROM order_items WHERE product_id = ?', [productId]);
     await pool.query('DELETE FROM favorite_products WHERE product_id = ?', [productId]);
@@ -477,6 +479,51 @@ fastify.put('/user/:id', async (request, reply) => {
 //   }
 // });
 
+fastify.post('/add-to-cart', async (request, reply) => {
+  const { memberId, productId, quantity } = request.body;
+
+  if (!memberId || !productId || !quantity) {
+    return reply.status(400).send({ error: 'Missing required fields' });
+  }
+
+  try {
+    // Get current stock of the product
+    const [productRows] = await pool.query('SELECT quantity FROM products WHERE product_id = ?', [productId]);
+    if (productRows.length === 0) {
+      return reply.status(404).send({ error: 'Product not found' });
+    }
+    const productStock = productRows[0].quantity;
+
+    // Get current quantity in the cart for this product
+    const [cartRows] = await pool.query('SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?', [memberId, productId]);
+    let currentQuantityInCart = 0;
+    if (cartRows.length > 0) {
+      currentQuantityInCart = cartRows[0].quantity;
+    }
+
+    // Calculate the new total quantity after adding the requested quantity
+    const newTotalQuantity = currentQuantityInCart + quantity;
+
+    // Check if the new total quantity exceeds the available stock
+    if (newTotalQuantity > productStock) {
+      return reply.status(400).send({ error: 'Requested quantity exceeds available stock' });
+    }
+
+    // Update or insert the product in the cart
+    if (cartRows.length > 0) {
+      await pool.query('UPDATE Shopping_Cart SET quantity = ? WHERE member_id = ? AND product_id = ?', [newTotalQuantity, memberId, productId]);
+    } else {
+      await pool.query('INSERT INTO Shopping_Cart (member_id, product_id, quantity) VALUES (?, ?, ?)', [memberId, productId, quantity]);
+    }
+
+    reply.send({ success: true, message: 'Product added to cart' });
+  } catch (err) {
+    request.log.error(err);
+    return reply.status(500).send({ error: 'Database error' });
+  }
+});
+
+
 // fastify.post('/add-to-cart', async (request, reply) => {
 //   const { memberId, productId, quantity } = request.body;
 
@@ -485,7 +532,7 @@ fastify.put('/user/:id', async (request, reply) => {
 //   }
 
 //   try {
-//     // ตรวจสอบว่า connection ถูกใช้ถูกต้อง
+//     // ตรวจสอบว่ามีสินค้าชิ้นนั้นๆ ในตะกร้าอยู่หรือไม่
 //     const [rows] = await pool.query(
 //       'SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?',
 //       [memberId, productId]
@@ -505,7 +552,7 @@ fastify.put('/user/:id', async (request, reply) => {
 
 //     // ดึงข้อมูลสินค้าในตะกร้าของผู้ใช้ทั้งหมดกลับมา
 //     const [updatedCart] = await pool.query(
-//       `SELECT sc.cart_id, sc.quantity, p.product_name, p.description, p.price, p.images_base64, p.quantity, sc.product_id
+//       `SELECT sc.cart_id, sc.quantity AS quantityInCart, p.product_name, p.description, p.price, p.images_base64, p.quantity, sc.product_id
 //       FROM Shopping_Cart sc 
 //       JOIN products p ON sc.product_id = p.product_id 
 //       WHERE sc.member_id = ?`,
@@ -518,48 +565,6 @@ fastify.put('/user/:id', async (request, reply) => {
 //     return reply.status(500).send({ error: 'Database error' });
 //   }
 // });
-
-fastify.post('/add-to-cart', async (request, reply) => {
-  const { memberId, productId, quantity } = request.body;
-
-  if (!memberId || !productId) {
-    return reply.status(400).send({ error: 'Missing required fields: memberId, productId, and quantity are required' });
-  }
-
-  try {
-    // ตรวจสอบว่ามีสินค้าชิ้นนั้นๆ ในตะกร้าอยู่หรือไม่
-    const [rows] = await pool.query(
-      'SELECT * FROM Shopping_Cart WHERE member_id = ? AND product_id = ?',
-      [memberId, productId]
-    );
-
-    if (rows.length > 0) {
-      await pool.query(
-        'UPDATE Shopping_Cart SET quantity = quantity + ? WHERE member_id = ? AND product_id = ?',
-        [quantity, memberId, productId]
-      );
-    } else {
-      await pool.query(
-        'INSERT INTO Shopping_Cart (member_id, product_id, quantity) VALUES (?, ?, ?)',
-        [memberId, productId, quantity]
-      );
-    }
-
-    // ดึงข้อมูลสินค้าในตะกร้าของผู้ใช้ทั้งหมดกลับมา
-    const [updatedCart] = await pool.query(
-      `SELECT sc.cart_id, sc.quantity AS quantityInCart, p.product_name, p.description, p.price, p.images_base64, p.quantity, sc.product_id
-      FROM Shopping_Cart sc 
-      JOIN products p ON sc.product_id = p.product_id 
-      WHERE sc.member_id = ?`,
-      [memberId]
-    );
-
-    reply.send({ success: true, message: 'Product added to cart', cartItems: updatedCart });
-  } catch (err) {
-    request.log.error(err);
-    return reply.status(500).send({ error: 'Database error' });
-  }
-});
 
 
 
@@ -650,7 +655,7 @@ fastify.get('/favorites/:member_id', async (request, reply) => {
       ProductName: favorite.product_name,
       ProductDescription: favorite.description,
       ProductPrice: favorite.price,
-      ProductImage: favorite.image_base64 ? favorite.image_base64.toString('utf-8') : null
+      ProductImage: favorite.images_base64
     }));
 
     reply.send(favoriteDetails);
@@ -1094,9 +1099,11 @@ fastify.get('/dashboard/sales-summary', async (request, reply) => {
 fastify.post('/product-ratings', async (req, res) => {
   const { productId, memberId, rating } = req.body;
 
-  if (!productId || !memberId || !rating) {
+  if (!productId || !memberId || rating === undefined || rating === null || rating < 0) {
     return res.status(400).send({ success: false, message: 'Invalid input data' });
-  }
+}
+
+  
 
   try {
     const [result] = await pool.query(
@@ -1109,6 +1116,7 @@ fastify.post('/product-ratings', async (req, res) => {
     res.status(500).send({ success: false, message: 'Failed to add rating' });
   }
 });
+
 
 // เพิ่มความคิดเห็นและคะแนน
 fastify.post('/product-reviews', async (req, res) => {
